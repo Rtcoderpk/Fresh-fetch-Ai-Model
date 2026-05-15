@@ -3,20 +3,20 @@ import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
+
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 
 # =========================
 # UI
 # =========================
 st.set_page_config(page_title="Fresh Fetch AI", page_icon="🤖")
-st.title("🤖 Fresh Fetch AI - RAG Assistant")
-st.write("Ask anything with live web + AI reasoning")
+st.title("🤖 Fresh Fetch AI (Clean RAG System)")
+st.write("Accurate answers from cleaned web data")
 
 
 # =========================
@@ -34,18 +34,16 @@ def search_web(query, max_results=3):
         urls = []
         with DDGS() as ddgs:
             results = ddgs.text(query, max_results=max_results)
-
             for r in results:
                 if "href" in r:
                     urls.append(r["href"])
-
         return urls
     except:
         return []
 
 
 # =========================
-# SCRAPE
+# CLEAN SCRAPER (IMPORTANT FIX)
 # =========================
 def scrape_url(url):
     try:
@@ -54,12 +52,33 @@ def scrape_url(url):
 
         soup = BeautifulSoup(res.text, "html.parser")
 
-        for tag in soup(["script", "style", "noscript"]):
+        # remove junk
+        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "form", "aside"]):
             tag.decompose()
 
         text = soup.get_text(" ", strip=True)
 
-        return text[:2000]
+        # aggressive cleaning
+        sentences = text.split(".")
+        clean = []
+
+        bad_words = [
+            "login", "sign up", "cookie", "subscribe",
+            "menu", "advertisement", "privacy policy",
+            "terms", "copyright"
+        ]
+
+        for s in sentences:
+            s = s.strip().lower()
+
+            if len(s) < 40:
+                continue
+            if any(b in s for b in bad_words):
+                continue
+
+            clean.append(s)
+
+        return ". ".join(clean[:15])
 
     except:
         return ""
@@ -88,38 +107,39 @@ def load_embeddings():
 # =========================
 def build_db(text):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=400,
+        chunk_size=350,
         chunk_overlap=50
     )
 
     chunks = splitter.split_text(text)
 
-    db = FAISS.from_texts(
-        chunks,
-        load_embeddings()
-    )
+    embeddings = load_embeddings()
 
-    return db
+    return FAISS.from_texts(chunks, embeddings)
 
 
 # =========================
-# GENERATION (FIXED)
+# STRICT ANSWER GENERATION (FIXED OUTPUT QUALITY)
 # =========================
 def generate_answer(model, tokenizer, query, context):
 
     prompt = f"""
 You are an expert assistant.
 
-Use ONLY the context below.
-Give detailed, structured answer with bullet points.
+RULES:
+- Use ONLY the context below
+- If context is not enough, say "insufficient information"
+- Do NOT copy website menus or irrelevant text
+- Give structured bullet points
+- Be accurate and clear
 
-Context:
+CONTEXT:
 {context}
 
-Question:
+QUESTION:
 {query}
 
-Answer:
+ANSWER:
 """
 
     inputs = tokenizer(
@@ -131,15 +151,12 @@ Answer:
 
     outputs = model.generate(
         **inputs,
-        max_new_tokens=350,
+        max_new_tokens=300,
         temperature=0.2,
         do_sample=False
     )
 
-    return tokenizer.decode(
-        outputs[0],
-        skip_special_tokens=True
-    )
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 
 # =========================
@@ -151,42 +168,42 @@ if st.button("Get Answer"):
 
     if not query:
         st.warning("Please enter a question")
+        st.stop()
 
-    else:
+    # STEP 1 - SEARCH
+    with st.spinner("Searching web..."):
+        urls = search_web(query)
 
-        # STEP 1: SEARCH
-        with st.spinner("Searching web..."):
-            urls = search_web(query)
+    st.subheader("Sources")
+    for u in urls:
+        st.write(u)
 
-        st.subheader("Sources")
+    # STEP 2 - SCRAPE CLEAN DATA
+    raw_text = ""
+    with st.spinner("Extracting clean content..."):
         for u in urls:
-            st.write(u)
+            raw_text += scrape_url(u) + "\n"
 
-        # STEP 2: SCRAPE
-        text = ""
-        with st.spinner("Reading sources..."):
-            for u in urls:
-                text += scrape_url(u) + "\n"
+    if not raw_text.strip():
+        st.error("No useful content extracted")
+        st.stop()
 
-        if not text.strip():
-            st.error("No content found")
-            st.stop()
+    # STEP 3 - VECTOR DB
+    with st.spinner("Building knowledge base..."):
+        db = build_db(raw_text)
 
-        # STEP 3: VECTOR DB
-        with st.spinner("Building knowledge base..."):
-            db = build_db(text)
+    # STEP 4 - LOAD MODEL
+    with st.spinner("Loading AI model..."):
+        model, tokenizer = load_model()
 
-        # STEP 4: LOAD MODEL
-        with st.spinner("Loading AI model..."):
-            model, tokenizer = load_model()
+    # STEP 5 - RETRIEVE
+    docs = db.similarity_search(query, k=5)
+    context = "\n".join([d.page_content for d in docs])
 
-        # STEP 5: RAG RETRIEVAL
-        docs = db.similarity_search(query, k=3)
-        context = "\n".join([d.page_content for d in docs])
+    # STEP 6 - GENERATE
+    with st.spinner("Generating answer..."):
+        answer = generate_answer(model, tokenizer, query, context)
 
-        # STEP 6: ANSWER
-        with st.spinner("Generating answer..."):
-            answer = generate_answer(model, tokenizer, query, context)
-
-        st.subheader("Answer")
-        st.write(answer)
+    # OUTPUT
+    st.subheader("Answer")
+    st.write(answer)
