@@ -1,0 +1,13 @@
+streamlit
+torch
+transformers
+accelerate
+bitsandbytes
+sentence-transformers
+faiss-cpu
+langchain
+langchain-community
+langchain-text-splitters
+beautifulsoup4
+requests
+ddgs
